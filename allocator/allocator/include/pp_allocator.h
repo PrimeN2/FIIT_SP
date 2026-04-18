@@ -5,8 +5,115 @@
 #ifndef SYS_PROG_PP_ALLOCATOR_H
 #define SYS_PROG_PP_ALLOCATOR_H
 
-#include <memory_resource>
+#include <cstddef>
 #include <memory>
+#include <new>
+
+#if __has_include(<memory_resource>)
+#include <memory_resource>
+#else
+namespace std::pmr
+{
+    class memory_resource
+    {
+    public:
+        virtual ~memory_resource() = default;
+
+        [[nodiscard]] void* allocate(std::size_t bytes, std::size_t alignment = alignof(std::max_align_t))
+        {
+            return do_allocate(bytes, alignment);
+        }
+
+        void deallocate(void* p, std::size_t bytes, std::size_t alignment = alignof(std::max_align_t))
+        {
+            do_deallocate(p, bytes, alignment);
+        }
+
+        [[nodiscard]] bool is_equal(const memory_resource& other) const noexcept
+        {
+            return do_is_equal(other);
+        }
+
+    private:
+        virtual void* do_allocate(std::size_t bytes, std::size_t alignment) = 0;
+        virtual void do_deallocate(void* p, std::size_t bytes, std::size_t alignment) = 0;
+        virtual bool do_is_equal(const memory_resource& other) const noexcept = 0;
+    };
+
+    inline bool operator==(const memory_resource& lhs, const memory_resource& rhs) noexcept
+    {
+        return &lhs == &rhs || lhs.is_equal(rhs);
+    }
+
+    inline bool operator!=(const memory_resource& lhs, const memory_resource& rhs) noexcept
+    {
+        return !(lhs == rhs);
+    }
+
+    class new_delete_resource_impl final : public memory_resource
+    {
+    private:
+        void* do_allocate(std::size_t bytes, std::size_t alignment) override
+        {
+            if (alignment > __STDCPP_DEFAULT_NEW_ALIGNMENT__)
+            {
+                return ::operator new(bytes, std::align_val_t(alignment));
+            }
+
+            return ::operator new(bytes);
+        }
+
+        void do_deallocate(void* p, std::size_t, std::size_t alignment) override
+        {
+            if (alignment > __STDCPP_DEFAULT_NEW_ALIGNMENT__)
+            {
+                ::operator delete(p, std::align_val_t(alignment));
+                return;
+            }
+
+            ::operator delete(p);
+        }
+
+        bool do_is_equal(const memory_resource& other) const noexcept override
+        {
+            return this == &other;
+        }
+    };
+
+    inline memory_resource* new_delete_resource() noexcept
+    {
+        static new_delete_resource_impl resource;
+        return &resource;
+    }
+
+    inline memory_resource*& default_resource_instance() noexcept
+    {
+        static memory_resource* current = new_delete_resource();
+        return current;
+    }
+
+    inline memory_resource* null_memory_resource() noexcept
+    {
+        return nullptr;
+    }
+
+    inline memory_resource* set_default_resource(memory_resource* resource) noexcept
+    {
+        memory_resource* previous = default_resource_instance();
+        if (resource != nullptr)
+        {
+            default_resource_instance() = resource;
+        }
+
+        return previous;
+    }
+
+    inline memory_resource* get_default_resource() noexcept
+    {
+        return default_resource_instance();
+    }
+}
+#endif
 
 struct smart_mem_resource : public std::pmr::memory_resource
 {
@@ -177,7 +284,7 @@ template<typename T>
 template<class U, class... Args>
 void pp_allocator<T>::construct(U *p, Args &&... args)
 {
-    std::uninitialized_construct_using_allocator(p, *this, std::forward<Args>(args)...);
+    ::new (static_cast<void*>(p)) U(std::forward<Args>(args)...);
 }
 
 template<typename T>
